@@ -48,9 +48,8 @@ def fetch_weather_data():
             params={
                 'lat': 34.7398,
                 'lng': 10.7600,
-                'params': 'airTemperature,humidity,windSpeed,pressure,precipitation,waveHeight,wavePeriod,cloudCover,seaLevel,soilMoisture',
-                'start': start,
-                'end': end
+                'params': 'airTemperature,humidity,windSpeed,pressure,precipitation,waveHeight,wavePeriod,cloudCover,seaLevel',
+                
             },
             headers={'Authorization': STORMGLASS_API_KEY}
         )
@@ -152,9 +151,10 @@ with DAG(
 ) as dag_weather:
 
 
-    download_static_dataset = PythonOperator(
+    download_static_dataset = BashOperator(
         task_id="download_static_dataset",
-        python_callable=lambda: os.system(f"kaggle datasets download nikhil7280/weather-type-classification -p {DATA_DIR}"),
+        bash_command="curl -L -o /opt/airflow/data/weather-type-classification.zip\
+  https://www.kaggle.com/api/v1/datasets/download/nikhil7280/weather-type-classification",
     )
 
     fetch_realtime_data = PythonOperator(
