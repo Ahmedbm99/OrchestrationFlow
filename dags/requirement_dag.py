@@ -31,7 +31,7 @@ with DAG(
     # Task to trigger SEN12Flood_Feature_Extraction DAG
     trigger_second_dag = TriggerDagRunOperator(
         task_id='trigger_satellite_data_processing_dag',
-        trigger_dag_id='satellite_data_processing_dag',  # The ID of the DAG to trigger
+        trigger_dag_id='satellite_data_processing',  # The ID of the DAG to trigger
         conf={"message": "First DAG has completed!"},  # Optional configuration
     )
 

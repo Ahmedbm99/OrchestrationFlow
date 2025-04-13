@@ -69,6 +69,7 @@ class OpenMeteoRealTimeFetcher:
         except (KeyError, TypeError, IndexError, AttributeError):
             return default
 
+
     def process_data(self, json_data: dict) -> Optional[dict]:
         """Process API response into features for real-time weather data."""
         if not json_data:
@@ -82,22 +83,23 @@ class OpenMeteoRealTimeFetcher:
             hourly_data = json_data["hourly"]
             daily_data = json_data["daily"]
 
-            # Extract the current time (or use the closest available time)
-            current_time = datetime.utcnow().strftime("%Y-%m-%dT%H:%M")
+        # Arrondir le temps actuel à l'heure pile (ex: 06:00)
+            now = datetime.utcnow()
+            rounded_time = now.replace(minute=0, second=0, microsecond=0)
+            current_time = rounded_time.strftime("%Y-%m-%dT%H:%M")
             hourly_times = hourly_data.get("time", [])
 
-        # Find the closest available time in the hourly data
+        # Trouver l'index de l'heure actuelle ou la plus proche
             try:
                 time_index = hourly_times.index(current_time)
             except ValueError:
-                # Find closest hour if exact time is not available
+                # Chercher l'heure la plus proche si l'exacte n'existe pas
                 min_diff = float('inf')
                 best_index = None
                 for i, t in enumerate(hourly_times):
                     try:
                         t_obj = datetime.strptime(t, "%Y-%m-%dT%H:%M")
-                        current_time_obj = datetime.strptime(current_time, "%Y-%m-%dT%H:%M")
-                        diff = abs((t_obj - current_time_obj).total_seconds())
+                        diff = abs((t_obj - rounded_time).total_seconds())
                         if diff < min_diff:
                             min_diff = diff
                             best_index = i
@@ -110,29 +112,33 @@ class OpenMeteoRealTimeFetcher:
                     logger.warning("No valid time found in hourly data")
                     return None
 
-        # Get the daily index (just use the most recent day)
+        # Récupérer les précipitations journalières
             daily_dates = daily_data.get("time", [])
             precip_sum_1d = daily_data.get("precipitation_sum", [])
-        
+
             if len(daily_dates) != len(precip_sum_1d):
                 logger.warning(f"Mismatch between daily dates and precipitation values: {len(daily_dates)} vs {len(precip_sum_1d)}")
 
             today_date = datetime.utcnow().strftime("%Y-%m-%d")
-            today_precipitation = None
             if today_date in daily_dates:
-                today_precipitation = precip_sum_1d[daily_dates.index(today_date)]
+                precipitation_value = precip_sum_1d[daily_dates.index(today_date)]
+                precipitation_date = today_date
             else:
-            # If today's date is not available, try the most recent data
+            # Utiliser la date la plus récente
                 most_recent_date = max(daily_dates, key=lambda date: datetime.strptime(date, "%Y-%m-%d"))
-                today_precipitation = precip_sum_1d[daily_dates.index(most_recent_date)]
+                precipitation_value = precip_sum_1d[daily_dates.index(most_recent_date)]
+                precipitation_date = most_recent_date
+
+        # Construction des features météo (hourly variables are fetched exactly as before)
             features = {
                 "current_time": current_time,
-                "daily_precipitation": today_precipitation,  # This will contain the date and corresponding precipitation value
-                "temp_2m": self.safe_extract(hourly_data, ["temperature_2m", time_index]),
+                "precipitation_date": precipitation_date,
+                "precip_sum_1d": precipitation_value,
+                "temperature_2m": self.safe_extract(hourly_data, ["temperature_2m", time_index]),
                 "precipitation_probability": self.safe_extract(hourly_data, ["precipitation_probability", time_index]),
                 "evapotranspiration": self.safe_extract(hourly_data, ["evapotranspiration", time_index]),
                 "snowfall": self.safe_extract(hourly_data, ["snowfall", time_index]),
-                "precip_hourly": self.safe_extract(hourly_data, ["precipitation", time_index]),
+                "precipitation": self.safe_extract(hourly_data, ["precipitation", time_index]),
                 "wind_gusts_10m": self.safe_extract(hourly_data, ["wind_gusts_10m", time_index]),
                 "pressure_msl": self.safe_extract(hourly_data, ["pressure_msl", time_index]),
                 "dewpoint_2m": self.safe_extract(hourly_data, ["dew_point_2m", time_index]),
@@ -145,11 +151,10 @@ class OpenMeteoRealTimeFetcher:
             }
 
             return features
+
         except Exception as e:
             logger.error(f"Error processing real-time weather data: {str(e)}", exc_info=True)
-        return None
-
-
+            return None
 
     def normalize_realtime_weather_data(self):
         """Normalise les données météorologiques"""
@@ -160,9 +165,9 @@ class OpenMeteoRealTimeFetcher:
             df = df.drop(columns=["current_time"], axis=1, errors='ignore')
             # Colonnes à normaliser
             columns_to_normalize = [
-                "temp_2m", "precipitation_probability", "soil_moisture", 
+                "temperature_2m", "precipitation_probability", "soil_moisture", 
                 "snowfall", "dewpoint_2m", "humidity_2m", "evapotranspiration", 
-                "precip_hourly", "snow_depth", "soil_temp","precip_sum_1d",
+                "precipitation", "snow_depth", "soil_temp","precip_sum_1d",
             ]
             
             # Appliquer la normalisation sur les colonnes numériques
@@ -175,17 +180,24 @@ class OpenMeteoRealTimeFetcher:
 
     def clean_realtime_weather_data(self):
         """Nettoie et prépare les données météorologiques"""
-        try:
-            df = pd.read_csv(self.output_file, on_bad_lines='skip')
 
-            df['temp_2m'] = df['temp_2m'].fillna(df['temp_2m'].mean())
+        column_names = [
+            "current_time", "precipitation_date", "precip_sum_1d", "temperature_2m", 
+            "precipitation_probability", "evapotranspiration", "snowfall", "precipitation", 
+            "wind_gusts_10m", "pressure_msl", "dewpoint_2m", "soil_moisture", "humidity_2m", 
+            "wind_speed_10m", "cloud_cover", "snow_depth", "soil_temp"
+        ]
+        try:
+            df = pd.read_csv(self.output_file, header=None, names=column_names, on_bad_lines='skip')
+
+            df['temperature_2m'] = df['temperature_2m'].fillna(df['temperature_2m'].mean())
             df['precipitation_probability'] = df['precipitation_probability'].fillna(0)
             df['soil_moisture'] = df['soil_moisture'].fillna(df['soil_moisture'].mean())
             df['snowfall'] = df['snowfall'].fillna(0)
             df['dewpoint_2m'] = df['dewpoint_2m'].fillna(df['dewpoint_2m'].mean())
             df['humidity_2m'] = df['humidity_2m'].fillna(df['humidity_2m'].mean())
             df['evapotranspiration'] = df['evapotranspiration'].fillna(0)
-            df['precip_hourly'] = df['precip_hourly'].fillna(0)
+            df['precipitation'] = df['precipitation'].fillna(0)
             df['snow_depth'] = df['snow_depth'].fillna(0)
             df['soil_temp'] = df['soil_temp'].fillna(df['soil_temp'].mean())
             
@@ -194,8 +206,8 @@ class OpenMeteoRealTimeFetcher:
             df = df.dropna()
 
             # Optionnel: Traiter les valeurs aberrantes
-            df = df[(df["temp_2m"] >= -50) & (df["temp_2m"] <= 50)]
-            df = df[(df["precip_hourly"] >= 0) & (df["precip_hourly"] <= 500)]
+            df = df[(df["temperature_2m"] >= -50) & (df["temperature_2m"] <= 50)]
+            df = df[(df["precipitation"] >= 0) & (df["precipitation"] <= 500)]
 
             logger.info("Real-time weather data cleaned.")
             return df
@@ -213,7 +225,7 @@ class OpenMeteoRealTimeFetcher:
             processed_data = self.process_data(weather_data)
             if processed_data:
                 # Save the processed data to a CSV file
-                pd.DataFrame([processed_data]).to_csv(self.output_file, mode='a', header=False, index=False)
+                pd.DataFrame([processed_data]).to_csv(self.output_file, mode='a', header=True, index=False)
                 
                 return processed_data
         return None

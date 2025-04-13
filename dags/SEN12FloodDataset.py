@@ -14,13 +14,13 @@ import seaborn as sns
 
 class SEN12FloodDataset(Dataset):
     def __init__(self, img_size=256, max_samples=None):
-        self.root_dir = "/opt/airflow/data/SEN12FLOOD/"
+        self.root_dir = "/opt/airflow/data/"
         self.img_size = img_size
         self.max_samples = max_samples
         self.required_bands = ['b02', 'b03', 'b04', 'b08']  # Required bands (excluding optional b11)
         
-        s1_json_path = "/opt/airflow/data/SEN12FLOOD/S1list.json"
-        s2_json_path = "/opt/airflow/data/SEN12FLOOD/S2list.json"
+        s1_json_path = "/opt/airflow/data/S1list.json"
+        s2_json_path = "/opt/airflow/data/S2list.json"
         # Load metadata
         with open(s1_json_path) as f:
             self.s1_metadata = json.load(f)
@@ -141,14 +141,14 @@ class SEN12FloodDataset(Dataset):
                 s2_bands.append(band_data)
             
             # Stack all bands (2 SAR + 4 optical)
-            image = np.concatenate([
-                np.stack([vv, vh], axis=0),
+            image = np.concatenate([ 
+                np.stack([vv, vh], axis=0), 
                 np.stack(s2_bands, axis=0)
             ], axis=0)
             
             return {
-                'image': torch.tensor(image, dtype=torch.float32),
-                'label': torch.tensor(int(sample['flooding']), dtype=torch.long),
+                'image': image.tolist(),  # Convert tensor to list for serialization
+                'label': int(sample['flooding']),
                 'date': sample['date'],
                 'scene_id': sample['scene_id']
             }
@@ -175,8 +175,8 @@ class SEN12FloodDataset(Dataset):
     def _create_dummy_sample(self):
         """Create a dummy sample when loading fails"""
         return {
-            'image': torch.zeros((len(self.required_bands) + 2, self.img_size, self.img_size)),
-            'label': torch.tensor(-1, dtype=torch.long),
+            'image': np.zeros((len(self.required_bands) + 2, self.img_size, self.img_size)).tolist(),  # Convert to list
+            'label': -1,
             'date': '',
             'scene_id': ''
         }
@@ -192,7 +192,7 @@ class FloodFeatureExtractor:
         
         for i in tqdm(range(num_samples), desc="Extracting features"):
             sample = self.dataset[i]
-            if sample['label'].item() == -1:
+            if sample['label'] == -1:
                 continue
                 
             try:
@@ -204,13 +204,13 @@ class FloodFeatureExtractor:
         return pd.DataFrame(features) if features else pd.DataFrame()
 
     def _extract_features_from_sample(self, sample):
-        image = sample['image'].numpy()
+        image = np.array(sample['image'])  # Convert back to numpy array
         
         # Basic metadata
         features = {
             'date': sample['date'],
             'scene_id': sample['scene_id'],
-            'label': sample['label'].item()
+            'label': sample['label']
         }
         
         # SAR features
@@ -259,113 +259,10 @@ def analyze_features(features_df, output_dir="results"):
     features_df.to_csv(os.path.join(output_dir, "flood_features.csv"), index=False)
     
     try:
-        numeric_cols = features_df.select_dtypes(include=np.number).columns
-        if 'label' not in numeric_cols:
-            print("No label column found for correlation analysis")
-            return None
-            
-        correlations = features_df[numeric_cols].corr()['label'].drop('label', errors='ignore')
-        corr_df = pd.DataFrame({'feature': correlations.index, 'correlation': correlations.values})
-        corr_df['abs_correlation'] = corr_df['correlation'].abs()
-        corr_df.sort_values('abs_correlation', ascending=False, inplace=True)
-        corr_df.to_csv(os.path.join(output_dir, "feature_correlations.csv"), index=False)
-        
-        # Plot top correlations
-        plt.figure(figsize=(12, 8))
-        sns.barplot(x='abs_correlation', y='feature', data=corr_df.head(20))
-        plt.title("Top Feature Correlations with Flood Labels")
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, "feature_correlations.png"))
-        plt.close()
-        
-        return corr_df
+        # Visualize feature correlations
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(features_df.corr(), annot=True, cmap='coolwarm', fmt='.2f', cbar=True)
+        plt.title("Feature Correlations")
+        plt.savefig(os.path.join(output_dir, "feature_correlation_heatmap.png"))
     except Exception as e:
-        print(f"Error during feature analysis: {str(e)}")
-        return None
-
-def visualize_sample(sample, output_path=None):
-    image = sample['image']
-    
-    plt.figure(figsize=(18, 12))
-    
-    # SAR bands
-    plt.subplot(2, 3, 1)
-    plt.imshow(image[0], cmap='gray')
-    plt.title(f"VV Band\nDate: {sample['date']}\nFlood: {sample['label'].item()}")
-    plt.colorbar()
-    
-    plt.subplot(2, 3, 2)
-    plt.imshow(image[1], cmap='gray')
-    plt.title("VH Band")
-    plt.colorbar()
-    
-    # False color composite
-    plt.subplot(2, 3, 3)
-    plt.imshow(np.stack([image[4], image[3], image[2]], axis=-1))  # NIR, Red, Green
-    plt.title("False Color (NIR-Red-Green)")
-    
-    # NDVI
-    plt.subplot(2, 3, 4)
-    ndvi = (image[4] - image[3]) / (image[4] + image[3] + 1e-6)  # (NIR-Red)/(NIR+Red)
-    plt.imshow(ndvi, cmap='RdYlGn', vmin=-1, vmax=1)
-    plt.title("NDVI")
-    plt.colorbar()
-    
-    # NDWI
-    plt.subplot(2, 3, 5)
-    ndwi = (image[2] - image[4]) / (image[2] + image[4] + 1e-6)  # (Green-NIR)/(Green+NIR)
-    plt.imshow(ndwi, cmap='RdYlBu', vmin=-1, vmax=1)
-    plt.title("NDWI")
-    plt.colorbar()
-    
-    # VV/VH ratio
-    plt.subplot(2, 3, 6)
-    ratio = image[0] / (image[1] + 1e-6)
-    plt.imshow(ratio, cmap='viridis')
-    plt.title("VV/VH Ratio")
-    plt.colorbar()
-    
-    plt.tight_layout()
-    if output_path:
-        plt.savefig(output_path)
-        plt.close()
-    else:
-        plt.show()
-
-def main():
-    try:
-        # Configuration
-     
-        
-       
-        dataset = SEN12FloodDataset()
-        print(dataset)
-        if len(dataset) > 0:
-            print(f"Successfully loaded {len(dataset)} samples")
-            
-            # Visualize first valid sample
-            valid_samples = [s for s in dataset.samples if os.path.exists(s['s1_vv'])]
-            if valid_samples:
-                sample_idx = dataset.samples.index(valid_samples[0])
-                sample = dataset[sample_idx]
-                visualize_sample(sample, "results/sample_visualization.png")
-            else:
-                print("No valid samples found for visualization")
-            
-            # Extract features
-            extractor = FloodFeatureExtractor(dataset)
-            features_df = extractor.extract_features()
-            
-            if not features_df.empty:
-                # Analyze features
-                correlations = analyze_features(features_df)
-                if correlations is not None:
-                    print("\nTop feature correlations:")
-                    print(correlations.head(10))
-            else:
-                print("No valid features extracted")
-        else:
-            print("No valid samples found in dataset")
-            
-    except Exception as e:
-        print(f"Fatal error: {str(e)}")
+        print(f"Error generating visualizations: {str(e)}")

@@ -1,5 +1,7 @@
 import os
 from airflow import DAG
+from airflow.models import Variable
+
 from airflow.operators.python import PythonOperator
 from datetime import datetime
 import pandas as pd
@@ -30,6 +32,7 @@ def preprocess_data():
     
     # Drop unnecessary columns
     dataset = dataset.drop(columns=['acquisition_date'], errors='ignore')
+    dataset = dataset.drop(columns=['precipitation_date'], errors='ignore')
     dataset = dataset.drop(columns=['scene_id'], errors='ignore')
     dataset = dataset.drop(columns=['batch_number'], errors='ignore')
     dataset = dataset.drop(columns=['precip_sum_2d'], errors='ignore')
@@ -54,6 +57,10 @@ def preprocess_data():
     # Save the preprocessed data for the next steps
     joblib.dump(scaler, '/opt/airflow/data/predict/scaler.pkl')
     joblib.dump((X_train, X_test, y_train, y_test), '/opt/airflow/data/predict/preprocessed_data.pkl')
+
+def reset_vars():
+    Variable.set("dag1_status", "")
+    Variable.set("dag2_status", "")
 
 def train_model():
     # Load the preprocessed data
@@ -87,7 +94,7 @@ dag = DAG(
     'flood_prediction_dag',
     default_args=default_args,
     description='Flood Prediction Model Training and Prediction',
-    schedule_interval='@daily',  
+    schedule_interval=None,  
 )
 
 # Define the tasks
@@ -103,6 +110,11 @@ preprocess_task = PythonOperator(
     dag=dag,
 )
 
+reset_task = PythonOperator(
+    task_id='reset_status_vars',
+    python_callable=reset_vars
+)
+
 train_task = PythonOperator(
     task_id='train_model',
     python_callable=train_model,
@@ -116,4 +128,4 @@ predict_task = PythonOperator(
 )
 
 # Task dependencies
-create_dir_task >> preprocess_task >> train_task >> predict_task
+create_dir_task >> preprocess_task >> train_task  >> reset_task >> predict_task
