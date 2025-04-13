@@ -95,11 +95,6 @@ def process_openmeteo_data(data: Dict, scene_id: str) -> List[Dict]:
         result.append(row)
     return result
 
-
-import json
-import pandas as pd
-from tqdm import tqdm
-
 def fetch_flood_weather_data(metadata_file: str, output_file: str) -> None:
     fetcher = OpenMeteoHistoricFetcher()
 
