@@ -1,5 +1,8 @@
-boto3
-json
-matplotlib.pyplot
-ftplib
-tarfile
+matplotlib
+scikit-learn
+scikit-image
+torch
+opencv-python-headless
+rasterio
+tqdm
+seaborn
