@@ -181,14 +181,9 @@ class OpenMeteoRealTimeFetcher:
     def clean_realtime_weather_data(self):
         """Nettoie et prépare les données météorologiques"""
 
-        column_names = [
-            "current_time", "precipitation_date", "precip_sum_1d", "temperature_2m", 
-            "precipitation_probability", "evapotranspiration", "snowfall", "precipitation", 
-            "wind_gusts_10m", "pressure_msl", "dewpoint_2m", "soil_moisture", "humidity_2m", 
-            "wind_speed_10m", "cloud_cover", "snow_depth", "soil_temp"
-        ]
+     
         try:
-            df = pd.read_csv(self.output_file, header=None, names=column_names, on_bad_lines='skip')
+            df = pd.read_csv(self.output_file, on_bad_lines='skip')
 
             df['temperature_2m'] = df['temperature_2m'].fillna(df['temperature_2m'].mean())
             df['precipitation_probability'] = df['precipitation_probability'].fillna(0)

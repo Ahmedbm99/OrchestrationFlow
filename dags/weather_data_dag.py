@@ -23,16 +23,12 @@ def load_scene_metadata():
         with open(SCENE_METADATA_PATH, 'r') as f:
             scene_metadata = json.load(f)
             logger.info(f"Chargé {len(scene_metadata)} scènes depuis {SCENE_METADATA_PATH}")
+            fetch_flood_weather_data(scene_metadata       )
             return scene_metadata
     except Exception as e:
         logger.error(f"Erreur lors du chargement des métadonnées : {e}")
         return {}
 
-def fetch_weather_data_from_scenes():
-    fetch_flood_weather_data(
-        metadata_file=SCENE_METADATA_PATH,
-        output_file=HISTORIC_WEATHER_PATH
-    )
 
 def set_status_and_maybe_trigger(**context):
     # Set the status of DAG1
@@ -47,25 +43,40 @@ def set_status_and_maybe_trigger(**context):
         context['ti'].xcom_push(key='trigger', value=False)
 
 
+
 def combine_weather_data():
     try:
         historic_data = pd.read_csv(HISTORIC_WEATHER_PATH, on_bad_lines='skip')
         realtime_data = pd.read_csv(REALTIME_WEATHER_PATH, on_bad_lines='skip')
-        realtime_data['flood_label'] = 0
-        missing_columns_historic = set(realtime_data.columns) - set(historic_data.columns)
-        missing_columns_realtime = set(historic_data.columns) - set(realtime_data.columns) 
-        for col in missing_columns_historic:
+
+        # Add flood_label = 0 to realtime_data if it doesn't exist
+        if 'flood_label' not in realtime_data.columns:
+            realtime_data['flood_label'] = 0
+
+        # Find missing columns in each DataFrame
+        missing_in_historic = set(realtime_data.columns) - set(historic_data.columns)
+        for col in missing_in_historic:
             historic_data[col] = 0
-        for col in missing_columns_realtime:
-            realtime_data[col] = 0   
-        historic_data = historic_data[realtime_data.columns]    
-        combined_data = pd.concat([historic_data, realtime_data], ignore_index=True)     
+
+        missing_in_realtime = set(historic_data.columns) - set(realtime_data.columns)
+        for col in missing_in_realtime:
+            realtime_data[col] = 0
+
+        # Ensure both have same column order
+        historic_data = historic_data[realtime_data.columns]
+
+        # Concatenate datasets
+        combined_data = pd.concat([historic_data, realtime_data], ignore_index=True)
         combined_data.fillna(0, inplace=True)
+
+        # Save to CSV
         combined_data.to_csv('/opt/airflow/data/store/combined_historic_realtime_weather_data.csv', index=False)
         logger.info("Données combinées sauvegardées avec succès.")
-        
+
     except Exception as e:
         logger.error(f"Erreur lors de la combinaison des données : {e}")
+
+
 
 
 
@@ -90,12 +101,12 @@ create_folder_task = BashOperator(
     dag=dag,    )
 fetch_weather_data_task = PythonOperator(
     task_id='fetch_weather_data_from_scenes',
-    python_callable=fetch_weather_data_from_scenes,
+    python_callable=load_scene_metadata,
     dag=dag,
 )
 clean_historic_weather_data_task = PythonOperator(
     task_id='clean_historic_weather_data',
-    python_callable=lambda: clean_weather_data().to_csv(HISTORIC_WEATHER_PATH, index=False),
+    python_callable= clean_weather_data,
     dag=dag,
 )
 check_and_trigger = PythonOperator(
@@ -126,8 +137,8 @@ trigger_fourth_dag = TriggerDagRunOperator(
     trigger_rule="all_done",
     execution_date="{{ ds }}",  # ou `{{ execution_date }}` selon besoin
     reset_dag_run=True,
-    poke_interval=30,
-    deferrable=True,
+    poke_interval=15,
+    deferrable=True
 )
 
 

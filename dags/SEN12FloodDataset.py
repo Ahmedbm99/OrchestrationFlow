@@ -3,33 +3,29 @@ import json
 import rasterio
 import pandas as pd
 import numpy as np
-import torch
-from torch.utils.data import Dataset
-import cv2
-import matplotlib.pyplot as plt
 from datetime import datetime
 from tqdm import tqdm
 from skimage.feature import graycomatrix, graycoprops
+import matplotlib.pyplot as plt
 import seaborn as sns
-
-class SEN12FloodDataset(Dataset):
+from skimage.filters import gaussian
+from skimage.transform import resize
+class SEN12FloodDataset:
     def __init__(self, img_size=256, max_samples=None):
         self.root_dir = "/opt/airflow/data/"
         self.img_size = img_size
         self.max_samples = max_samples
-        self.required_bands = ['b02', 'b03', 'b04', 'b08']  # Required bands (excluding optional b11)
+        self.required_bands = ['b02', 'b03', 'b04', 'b08']
         
-        s1_json_path = "/opt/airflow/data/S1list.json"
-        s2_json_path = "/opt/airflow/data/S2list.json"
-        # Load metadata
+        s1_json_path = os.path.join(self.root_dir, "S1list.json")
+        s2_json_path = os.path.join(self.root_dir, "S2list.json")
         with open(s1_json_path) as f:
             self.s1_metadata = json.load(f)
         with open(s2_json_path) as f:
             self.s2_metadata = json.load(f)
         
-        # Prepare samples with strict validation
         self.samples = self._prepare_samples()
-        print(f"Found {len(self.samples)} valid S1+S2 sample pairs after validation")
+        print(f"Found {len(self.samples)} valid S1+S2 sample pairs.")
 
     def _prepare_samples(self):
         samples = []
@@ -40,6 +36,7 @@ class SEN12FloodDataset(Dataset):
                 continue
                 
             scene_dir = os.path.join(self.root_dir, scene_data['folder'])
+            
             if not os.path.exists(scene_dir):
                 continue
                 
@@ -48,8 +45,6 @@ class SEN12FloodDataset(Dataset):
             
             for s1_img_id, s1_info in s1_images.items():
                 for s2_img_id, s2_info in s2_images.items():
-                    if self.max_samples and len(samples) >= self.max_samples:
-                        return samples
                     
                     s1_date = self._normalize_date(s1_info['date'])
                     s2_date = self._normalize_date(s2_info['date'])
@@ -62,38 +57,31 @@ class SEN12FloodDataset(Dataset):
                             'date': s1_date,
                             'scene_id': scene_id
                         }
-                        
-                        # Add required bands
+                                   
                         s2_base = s2_info['filename']
                         for band in self.required_bands:
                             sample[band] = os.path.join(scene_dir, f"{s2_base}_{band}.tif")
                         
-                        # Verify all required files exist and have valid shapes
                         if self._validate_sample(sample):
                             samples.append(sample)
         
         return samples
 
     def _validate_sample(self, sample):
-        """Validate that all files exist and have compatible dimensions"""
-        try:
-            # Check file existence
-            if not all(v and os.path.exists(v) for k, v in sample.items() 
-                      if k not in ['flooding', 'date', 'scene_id']):
+        try:        
+            if not all(os.path.exists(v) for k, v in sample.items() if k not in ['flooding', 'date', 'scene_id']):
+                
+                print(os.path.exists(os.path.exists(v) for k, v in sample.items() if k not in ['flooding', 'date', 'scene_id']))
                 return False
-            
-            # Check initial dimensions
             with rasterio.open(sample['s1_vv']) as src:
                 vv_shape = src.shape
             with rasterio.open(sample['b02']) as src:
                 b02_shape = src.shape
                 
-            # Ensure all bands have same shape as b02
             for band in self.required_bands[1:]:
                 with rasterio.open(sample[band]) as src:
                     if src.shape != b02_shape:
                         return False
-            
             return True
         except:
             return False
@@ -130,52 +118,42 @@ class SEN12FloodDataset(Dataset):
         sample = self.samples[idx]
         
         try:
-            # Load SAR data with shape validation
             vv = self._load_and_preprocess(sample['s1_vv'], sar=True)
             vh = self._load_and_preprocess(sample['s1_vh'], sar=True)
+            s2_bands = [self._load_and_preprocess(sample[band], sar=False) for band in self.required_bands]
             
-            # Load optical data
-            s2_bands = []
-            for band in self.required_bands:
-                band_data = self._load_and_preprocess(sample[band], sar=False)
-                s2_bands.append(band_data)
-            
-            # Stack all bands (2 SAR + 4 optical)
-            image = np.concatenate([ 
-                np.stack([vv, vh], axis=0), 
-                np.stack(s2_bands, axis=0)
+            image = np.concatenate([
+                np.stack([vv, vh]),
+                np.stack(s2_bands)
             ], axis=0)
             
             return {
-                'image': image.tolist(),  # Convert tensor to list for serialization
+                'image': image,
                 'label': int(sample['flooding']),
                 'date': sample['date'],
                 'scene_id': sample['scene_id']
             }
-            
         except Exception as e:
             print(f"Error loading sample {idx}: {str(e)}")
             return self._create_dummy_sample()
 
     def _load_and_preprocess(self, path, sar=False):
-        """Load and preprocess single band"""
         with rasterio.open(path) as src:
             data = src.read(1).astype(np.float32)
-        
+
         if sar:
             data = 10 * np.log10(data + 1e-6)
-            data = cv2.GaussianBlur(data, (3, 3), 0)
-        
+            data = gaussian(data, sigma=1, preserve_range=True)
+
         p1, p99 = np.percentile(data, [1, 99])
         data = np.clip(data, p1, p99)
         data = (data - p1) / (p99 - p1 + 1e-6)
-        data = cv2.resize(data, (self.img_size, self.img_size), interpolation=cv2.INTER_AREA)
+        data = resize(data, (self.img_size, self.img_size), order=1, preserve_range=True, anti_aliasing=True)
         return data
 
     def _create_dummy_sample(self):
-        """Create a dummy sample when loading fails"""
         return {
-            'image': np.zeros((len(self.required_bands) + 2, self.img_size, self.img_size)).tolist(),  # Convert to list
+            'image': np.zeros((len(self.required_bands) + 2, self.img_size, self.img_size)),
             'label': -1,
             'date': '',
             'scene_id': ''
@@ -194,7 +172,6 @@ class FloodFeatureExtractor:
             sample = self.dataset[i]
             if sample['label'] == -1:
                 continue
-                
             try:
                 features.append(self._extract_features_from_sample(sample))
             except Exception as e:
@@ -204,18 +181,15 @@ class FloodFeatureExtractor:
         return pd.DataFrame(features) if features else pd.DataFrame()
 
     def _extract_features_from_sample(self, sample):
-        image = np.array(sample['image'])  # Convert back to numpy array
+        image = sample['image']
         
-        # Basic metadata
         features = {
             'date': sample['date'],
             'scene_id': sample['scene_id'],
             'label': sample['label']
         }
         
-        # SAR features
-        vv = image[0]
-        vh = image[1]
+        vv, vh = image[0], image[1]
         features.update({
             'vv_mean': vv.mean(),
             'vh_mean': vh.mean(),
@@ -224,22 +198,17 @@ class FloodFeatureExtractor:
             'vh_std': vh.std(),
         })
         
-        # Texture features
         features.update(self._calc_texture_features(vv, 'vv_'))
         features.update(self._calc_texture_features(vh, 'vh_'))
         
-        # Spectral indices
-        b03 = image[2]  # Green (index 2 because SAR bands are first)
-        b04 = image[3]  # Red
-        b08 = image[4]  # NIR
-        
+        b03, b04, b08 = image[2], image[3], image[4]
         features.update({
-            'ndwi': (b03 - b08) / (b03 + b08 + 1e-6).mean(),
-            'ndvi': (b08 - b04) / (b08 + b04 + 1e-6).mean(),
+            'ndwi': ((b03 - b08) / (b03 + b08 + 1e-6)).mean(),
+            'ndvi': ((b08 - b04) / (b08 + b04 + 1e-6)).mean(),
         })
         
         return features
-    
+
     def _calc_texture_features(self, img, prefix):
         img_8bit = ((img - img.min()) * (255 / (img.max() - img.min() + 1e-6))).astype(np.uint8)
         glcm = graycomatrix(img_8bit, distances=[1], angles=[0], symmetric=True, normed=True)
@@ -255,14 +224,22 @@ def analyze_features(features_df, output_dir="results"):
         print("No valid features to analyze")
         return None
     
-    # Save raw features
     features_df.to_csv(os.path.join(output_dir, "flood_features.csv"), index=False)
     
     try:
-        # Visualize feature correlations
-        plt.figure(figsize=(10, 8))
-        sns.heatmap(features_df.corr(), annot=True, cmap='coolwarm', fmt='.2f', cbar=True)
+        plt.figure(figsize=(12, 10))
+        sns.heatmap(features_df.corr(), annot=False, cmap='coolwarm', fmt='.2f', cbar=True)
         plt.title("Feature Correlations")
+        plt.tight_layout()
         plt.savefig(os.path.join(output_dir, "feature_correlation_heatmap.png"))
+        plt.close()
+        print("Feature analysis saved.")
     except Exception as e:
-        print(f"Error generating visualizations: {str(e)}")
+        print(f"Error generating visualization: {str(e)}")
+
+# Example usage
+if __name__ == "__main__":
+    dataset = SEN12FloodDataset(img_size=128, max_samples=100)
+    extractor = FloodFeatureExtractor(dataset)
+    features_df = extractor.extract_features(num_samples=50)
+    analyze_features(features_df)

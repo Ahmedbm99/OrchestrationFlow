@@ -31,6 +31,8 @@ def preprocess_data():
     dataset = pd.read_csv("/opt/airflow/data/store/combined_historic_realtime_weather_data.csv")
     
     # Drop unnecessary columns
+    dataset = dataset.drop(columns=['timestamp'], errors='ignore')
+    dataset = dataset.drop(columns=['current_time'], errors='ignore')
     dataset = dataset.drop(columns=['acquisition_date'], errors='ignore')
     dataset = dataset.drop(columns=['precipitation_date'], errors='ignore')
     dataset = dataset.drop(columns=['scene_id'], errors='ignore')

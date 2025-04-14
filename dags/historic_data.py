@@ -1,9 +1,11 @@
 import os
+import sys
 import json
 import requests
-from typing import List, Dict, Set
-from datetime import datetime
+import numpy as np
 import pandas as pd
+from typing import List, Dict, Set
+from datetime import datetime, timedelta
 from tqdm import tqdm
 import logging
 
@@ -17,7 +19,7 @@ class OpenMeteoHistoricFetcher:
         self.base_url = "https://archive-api.open-meteo.com/v1/archive"
         self.daily_params = ["precipitation_sum"]
         self.hourly_params = [
-            "temperature_2m", "precipitation", "wind_gusts_10m", 
+            "temperature_2m", "precipitation", "wind_gusts_10m",
             "pressure_msl", "dew_point_2m", "soil_moisture_0_to_7cm",
             "relative_humidity_2m", "wind_speed_10m", "cloud_cover",
             "snow_depth", "soil_temperature_0_to_7cm",
@@ -29,33 +31,31 @@ class OpenMeteoHistoricFetcher:
         self.load_state()
 
     def load_state(self) -> None:
-        try:
-            if os.path.exists(self.state_file):
+        if os.path.exists(self.state_file):
+            try:
                 with open(self.state_file, 'r') as f:
                     state = json.load(f)
                     self.processed_scenes = set(state.get('processed_scenes', []))
                 logger.info(f"Loaded state: {len(self.processed_scenes)} processed scenes")
-        except Exception as e:
-            logger.warning(f"Failed to load state: {str(e)}")
-            self.processed_scenes = set()
+            except Exception as e:
+                logger.warning(f"Failed to load state: {str(e)}")
 
     def save_state(self) -> None:
         try:
-            state = {
-                'processed_scenes': list(self.processed_scenes),
-                'last_updated': datetime.now().isoformat()
-            }
             with open(self.state_file, 'w') as f:
-                json.dump(state, f, indent=2)
+                json.dump({
+                    'processed_scenes': list(self.processed_scenes),
+                    'last_updated': datetime.now().isoformat()
+                }, f, indent=2)
         except Exception as e:
             logger.error(f"Failed to save state: {str(e)}")
 
-    def fetch_weather(self, lat: float, lon: float, start: str, end: str) -> Dict:
+    def fetch_data(self, lat: float, lon: float, start: datetime, end: datetime) -> Dict:
         params = {
             "latitude": lat,
             "longitude": lon,
-            "start_date": start,
-            "end_date": end,
+            "start_date": start.strftime("%Y-%m-%d"),
+            "end_date": end.strftime("%Y-%m-%d"),
             "daily": ",".join(self.daily_params),
             "hourly": ",".join(self.hourly_params),
             **self.settings
@@ -75,7 +75,7 @@ class OpenMeteoHistoricFetcher:
         self.processed_scenes.add(scene_id)
 
 
-def process_openmeteo_data(data: Dict, scene_id: str) -> List[Dict]:
+def process_openmeteo_data(data: Dict, scene_id: str, acquisition_date: str) -> List[Dict]:
     if "hourly" not in data:
         logger.warning(f"No hourly data found for scene {scene_id}")
         return []
@@ -87,7 +87,8 @@ def process_openmeteo_data(data: Dict, scene_id: str) -> List[Dict]:
     for i, timestamp in enumerate(times):
         row = {
             "scene_id": scene_id,
-            "timestamp": timestamp
+            "timestamp": timestamp,
+            "acquisition_date": acquisition_date
         }
         for param in hourly:
             if param != "time":
@@ -95,72 +96,85 @@ def process_openmeteo_data(data: Dict, scene_id: str) -> List[Dict]:
         result.append(row)
     return result
 
-def fetch_flood_weather_data(metadata_file: str, output_file: str) -> None:
+
+def save_partial_results(data_rows: List[Dict], prefix: str = "") -> None:
+    if data_rows:
+        df = pd.DataFrame(data_rows)
+        output_path = f"/opt/airflow/data/store/{prefix}combined_historic_weather_features.csv"
+        df.to_csv(output_path, index=False)
+        logger.info(f"Saved weather data to: {output_path}")
+
+
+def fetch_flood_weather_data(scene_metadata: Dict) -> pd.DataFrame:
     fetcher = OpenMeteoHistoricFetcher()
+    all_weather_data = []
 
-    with open(metadata_file, 'r') as f:
-        metadata = json.load(f)
+    scene_items = [(sid, meta) for sid, meta in scene_metadata.items()
+                   if isinstance(sid, str) and sid.isdigit()]
 
-    weather_data = []
+    try:
+        with tqdm(total=len(scene_items), desc="Processing Scenes") as scene_pbar:
+            for scene_id, metadata in scene_items:
+                if fetcher.is_processed(scene_id):
+                    scene_pbar.update(1)
+                    continue
+                try:
+                    coords = metadata.get("geo", {}).get("coordinates", [[[0, 0]]])[0]
+                    lon, lat = np.array(coords).mean(axis=0)
 
-    # Iterate over each folder in the metadata
-    for folder_id, folder_data in tqdm(metadata.items(), desc="Fetching weather data"):
-        # Check for scenes in the folder
-        for scene_key, scene in folder_data.items():
-            if scene_key == "count" or scene_key == "folder" or scene_key == "geo" or scene_key == "urls":
-                continue  # Skip non-scene fields
+                    acq_items = [(k, v) for k, v in metadata.items() if k.isdigit()]
+                    for acq_key, acquisition in acq_items:
+                        date_str = acquisition.get("date")
+                        if not date_str:
+                            continue
+                        date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+                        start_date = date_obj - timedelta(days=1)
+                        end_date = date_obj
 
-            scene_id = f"{folder_id}_{scene_key}"
-            if fetcher.is_processed(scene_id):
-                continue
+                        api_data = fetcher.fetch_data(lat, lon, start_date, end_date)
 
-            lat, lon = None, None
-            # Extract geographical coordinates from the "geo" field if available
-            if 'geo' in folder_data:
-                lat, lon = folder_data['geo']['coordinates'][0][0][1], folder_data['geo']['coordinates'][0][0][0]
-            
-            date = scene.get("date")
-            flooding = scene.get("FLOODING")
-            orbit = scene.get("orbit")
-            filename = scene.get("filename")
-            start = date  # Using the same date as both start and end for simplicity, adjust if needed
-            end = date
+                        weather_features = process_openmeteo_data(
+                            api_data, scene_id, date_str
+                        )
 
-            if not all([lat, lon, start, end]):
-                logger.warning(f"Incomplete metadata for scene {scene_id}, skipping.")
-                continue
+                        for row in weather_features:
+                            row["flood_label"] = acquisition.get("FLOODING", False)
 
-            # Fetch weather data from OpenMeteo
-            data = fetcher.fetch_weather(lat, lon, start, end)
-            processed = process_openmeteo_data(data, scene_id)
+                        all_weather_data.extend(weather_features)
 
-            if processed:
-                weather_data.extend(processed)
-                fetcher.mark_as_processed(scene_id)
+                    fetcher.mark_as_processed(scene_id)
 
-    if weather_data:
-        df = pd.DataFrame(weather_data)
-        df.to_csv(output_file, index=False)
-        logger.info(f"Saved weather data to {output_file}")
-    else:
-        logger.info("No new data to save.")
+                except Exception as e:
+                    logger.error(f"Error processing scene {scene_id}: {str(e)}", exc_info=True)
+                finally:
+                    scene_pbar.update(1)
 
-    fetcher.save_state()
+        fetcher.save_state()
+
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}", exc_info=True)
+
+    # Sauvegarde finale (toujours dans combined_historic_weather_features.csv)
+    save_partial_results(all_weather_data)
+
+    return pd.DataFrame(all_weather_data)
+
 
 def clean_weather_data():
-        """Clean and prepare weather data"""
-        weather_df = pd.read_csv("/opt/airflow/data/store/combined_historic_weather_features.csv")
-    # Supprimer les lignes avec des valeurs manquantes
-        weather_df = weather_df.dropna()
-    
-    # Supprimer les doublons basés sur scene_id et acquisition_date
-        weather_df = weather_df.drop_duplicates(subset=["scene_id", "acquisition_date"])
-    
-    # Optionnel: Traiter les valeurs aberrantes
-    # Exemple: Enlever les températures inférieures à -50°C ou supérieures à 50°C
-        weather_df = weather_df[(weather_df["temperature_2m"] >= -50) & (weather_df["temperature_2m"] <= 50)]
-    
-    # Exemple de suppression des valeurs de précipitation improbables
-        weather_df = weather_df[(weather_df["precipitation"] >= 0) & (weather_df["precipitation"] <= 500)]
-    
-        return weather_df
+    """Clean and prepare weather data"""
+    file_path = "/opt/airflow/data/store/combined_historic_weather_features.csv"
+    if not os.path.exists(file_path):
+        logger.warning(f"{file_path} not found.")
+        return pd.DataFrame()
+
+    weather_df = pd.read_csv(file_path)
+
+    # Drop missing and duplicate entries
+    weather_df = weather_df.dropna()
+    weather_df = weather_df.drop_duplicates(subset=["scene_id", "acquisition_date"])
+
+    # Outlier filtering
+    weather_df = weather_df[(weather_df["temperature_2m"] >= -50) & (weather_df["temperature_2m"] <= 50)]
+    weather_df = weather_df[(weather_df["precipitation"] >= 0) & (weather_df["precipitation"] <= 500)]
+
+    return weather_df
