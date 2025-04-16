@@ -79,17 +79,50 @@ def train_model():
     accuracy = model.score(X_test, y_test)
     print(f"Model accuracy: {accuracy * 100:.2f}%")
 
-def make_prediction(input_data):
-    # Load the trained model and scaler
+import joblib
+import pandas as pd
+import logging
+
+def make_prediction(**kwargs):
     model = joblib.load("/opt/airflow/data/predict/flood_prediction_model.pkl")
     scaler = joblib.load('/opt/airflow/data/predict/scaler.pkl')
+
+    input_dict = {
+        "precip_sum_1d": [5.2],
+        "temperature_2m": [18.3],
+        "precipitation_probability": [75],
+        "evapotranspiration": [2.1],
+        "snowfall": [0],
+        "precipitation": [4.8],
+        "wind_gusts_10m": [32],
+        "pressure_msl": [1013],
+        "dewpoint_2m": [12.1],
+        "soil_moisture": [0.3],
+        "humidity_2m": [80],
+        "wind_speed_10m": [10],
+        "cloud_cover": [65],
+        "snow_depth": [0],
+        "soil_temp": [15.2],
+        "relative_humidity_2m": [82],
+        "soil_temperature_0_to_7cm": [14.8],
+        "soil_moisture_0_to_7cm": [0.28],
+        "dew_point_2m": [11.9]
+    }
+
     
-    # Preprocess the input data (using the same scaler as used for training)
-    input_data_scaled = scaler.transform(input_data)
-    
-    # Make a prediction
+    input_df = pd.DataFrame(input_dict)
+    input_data_scaled = scaler.transform(input_df)      
     prediction = model.predict(input_data_scaled)
-    return prediction
+   
+    flood_status = "Flood" if prediction[0] == 1 else "No Flood"
+    
+    logging.info(f"Flood prediction result: {flood_status} (Prediction: {prediction[0]}) with data {input_dict}")
+    print(f"Flood prediction result: {flood_status} (Prediction: {prediction[0]}) with data {input_dict}")  
+    task_instance = kwargs.get('ti')
+    task_instance.xcom_push(key='flood_status', value=flood_status)
+    
+    return flood_status
+
 
 # Define the DAG
 dag = DAG(
